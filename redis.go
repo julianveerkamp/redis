@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/bsm/redislock"
+	"github.com/go-redis/redis/v9"
 	"github.com/kvtools/valkeyrie"
 	"github.com/kvtools/valkeyrie/store"
 )
@@ -260,13 +261,16 @@ func (r *Store) NewLock(_ context.Context, key string, opts *store.LockOptions) 
 		}
 	}
 
+	lc := redislock.New(r.client)
+
 	return &redisLock{
-		redis:    r,
-		last:     nil,
-		key:      key,
-		value:    value,
-		ttl:      ttl,
-		unlockCh: make(chan struct{}),
+		redis:      r,
+		lock:       nil,
+		lockClient: lc,
+		key:        key,
+		value:      value,
+		ttl:        ttl,
+		unlockCh:   make(chan struct{}),
 	}, nil
 }
 
@@ -553,9 +557,10 @@ func (s *subscribe) receiveLoop(ctx context.Context, msgCh chan *redis.Message) 
 }
 
 type redisLock struct {
-	redis    *Store
-	last     *store.KVPair
-	unlockCh chan struct{}
+	redis      *Store
+	lock       *redislock.Lock
+	lockClient *redislock.Client
+	unlockCh   chan struct{}
 
 	key   string
 	value []byte
@@ -599,11 +604,9 @@ func (l *redisLock) Lock(ctx context.Context) (<-chan struct{}, error) {
 // and return `false, nil` when it can't lock now,
 // and return `false, err` if any unexpected error happened underlying.
 func (l *redisLock) tryLock(ctx context.Context, lockHeld chan struct{}) (bool, error) {
-	success, item, err := l.redis.AtomicPut(ctx, l.key, l.value, l.last, &store.WriteOptions{
-		TTL: l.ttl,
-	})
-	if success {
-		l.last = item
+	lock, err := l.lockClient.Obtain(ctx, l.key, l.ttl, nil)
+	if err == nil {
+		l.lock = lock
 		// keep holding.
 		go l.holdLock(ctx, lockHeld)
 		return true, nil
@@ -618,12 +621,7 @@ func (l *redisLock) holdLock(ctx context.Context, lockHeld chan struct{}) {
 	defer close(lockHeld)
 
 	hold := func() error {
-		_, item, err := l.redis.AtomicPut(ctx, l.key, l.value, l.last, &store.WriteOptions{
-			TTL: l.ttl,
-		})
-		if err == nil {
-			l.last = item
-		}
+		err := l.lock.Refresh(ctx, 100*time.Millisecond, nil)
 		return err
 	}
 
@@ -647,12 +645,12 @@ func (l *redisLock) holdLock(ctx context.Context, lockHeld chan struct{}) {
 func (l *redisLock) Unlock(ctx context.Context) error {
 	l.unlockCh <- struct{}{}
 
-	_, err := l.redis.AtomicDelete(ctx, l.key, l.last)
+	err := l.lock.Release(ctx)
 	if err != nil {
 		return err
 	}
 
-	l.last = nil
+	l.lock = nil
 
 	return nil
 }
