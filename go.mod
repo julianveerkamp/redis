@@ -1,4 +1,4 @@
-module github.com/kvtools/redis
+module github.com/julianveerkamp/redis
 
 go 1.18
 
