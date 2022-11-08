@@ -604,7 +604,8 @@ func (l *redisLock) Lock(ctx context.Context) (<-chan struct{}, error) {
 // and return `false, nil` when it can't lock now,
 // and return `false, err` if any unexpected error happened underlying.
 func (l *redisLock) tryLock(ctx context.Context, lockHeld chan struct{}) (bool, error) {
-	lock, err := l.lockClient.Obtain(ctx, l.key, l.ttl, nil)
+	opt := &redislock.Options{RetryStrategy: redislock.LimitRetry(redislock.LinearBackoff(1*time.Second), 10)}
+	lock, err := l.lockClient.Obtain(ctx, l.key, l.ttl, opt)
 	if err == nil {
 		l.lock = lock
 		// keep holding.
